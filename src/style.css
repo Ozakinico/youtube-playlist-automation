@@ -84,3 +84,9 @@ dialog::backdrop { background: #1c102aa6; }
 @media (max-width: 380px) {
   .filter-grid { grid-template-columns: 1fr; }
 }
+
+.owned-playlists {
+  display: block;
+  margin-top: 12px;
+  max-width: 650px;
+}

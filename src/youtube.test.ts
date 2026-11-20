@@ -46,3 +46,21 @@ it('does not send the next page when a read is cancelled', async () => {
   await expect(api.items('source', controller.signal, () => controller.abort())).rejects.toMatchObject({ name: 'AbortError' })
   expect(request).toHaveBeenCalledTimes(1)
 })
+
+it('lists all playlists owned by the authenticated YouTube channel', async () => {
+  const request = vi.fn(async (input: string | URL | Request) => {
+    const url = new URL(String(input))
+    expect(url.pathname).toBe('/youtube/v3/playlists')
+    expect(url.searchParams.get('mine')).toBe('true')
+    expect(url.searchParams.get('maxResults')).toBe('50')
+    return url.searchParams.has('pageToken')
+      ? Response.json({ items: [{ id: 'PLSecond', snippet: { title: '再生リスト 2' } }] })
+      : Response.json({ items: [{ id: 'PLFirst', snippet: { title: '再生リスト 1' } }], nextPageToken: 'next' })
+  })
+  const api = createYouTube('mock', () => {}, request)
+  expect(await api.ownedPlaylists()).toEqual([
+    { id: 'PLFirst', title: '再生リスト 1' },
+    { id: 'PLSecond', title: '再生リスト 2' },
+  ])
+  expect(request).toHaveBeenCalledTimes(2)
+})

@@ -1,13 +1,12 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { createRoot } from 'react-dom/client'
 import { authConfigured, loadAuth, revoke, signIn, type Session } from './auth'
-import { csv, estimateQuota, filterVideos, initialFilters, playlistId, publishedDay, validateFilters, videoUrl } from './domain'
+import { csv, estimateQuota, filterVideos, formatDuration, initialFilters, playlistId, publishedDay, validateFilters, videoUrl } from './domain'
 import { errorText, isRemaining, loadQueue, queueKey, runQueue, type JobStatus, type Queue } from './queue'
-import { ApiError, compare, createYouTube } from './youtube'
+import { ApiError, compare, createYouTube, type YouTube } from './youtube'
 import './style.css'
 
 const exampleSource = 'https://www.youtube.com/playlist?list=PLBjvsplOhSrozBvdOopxKBFdvr4aOU8ZZ'
-const exampleTarget = 'https://www.youtube.com/playlist?list=PLrDZAy5Hugol5zl8wJzFB2gsfYnkh64eQ'
 const number = new Intl.NumberFormat('ja-JP')
 const statusLabel: Record<JobStatus, string> = {
   pending: '待機中', sending: '送信中・要照合', added: '追加済み', skipped: 'スキップ', failed: '失敗',
@@ -28,7 +27,8 @@ function App() {
   const [authLoading, setAuthLoading] = useState(false)
   const [signing, setSigning] = useState(false)
   const [source, setSource] = useState(exampleSource)
-  const [target, setTarget] = useState(exampleTarget)
+  const [target, setTarget] = useState('')
+  const [ownedPlaylists, setOwnedPlaylists] = useState<Awaited<ReturnType<YouTube['ownedPlaylists']>>>()
   const [comparison, setComparison] = useState<Awaited<ReturnType<typeof compare>>>()
   const [filters, setFilters] = useState(initialFilters)
   const [showUnavailable, setShowUnavailable] = useState(false)
@@ -40,7 +40,7 @@ function App() {
   const [usage, setUsage] = useState(0)
   const [queue, setQueue] = useState<Queue | null>(null)
   const [storageReady, setStorageReady] = useState(false)
-  const [mode, setMode] = useState<'reading' | 'writing'>()
+  const [mode, setMode] = useState<'reading' | 'writing' | 'choosing'>()
   const [progress, setProgress] = useState('')
   const [error, setError] = useState('')
   const controller = useRef<AbortController | null>(null)
@@ -90,7 +90,10 @@ function App() {
   }, [])
 
   useEffect(() => {
-    if (!session) return
+    if (!session) {
+      setOwnedPlaylists(undefined)
+      return
+    }
     const timeout = setTimeout(() => setSession(current => current === session ? null : current),
       Math.max(0, session.expires - Date.now()))
     return () => clearTimeout(timeout)
@@ -132,6 +135,23 @@ function App() {
     setPage(0)
     setShowUnavailable(false)
     setProgress('')
+  }
+
+  async function fetchOwnedPlaylists() {
+    setError('')
+    const abort = new AbortController()
+    controller.current = abort
+    setMode('choosing')
+    try {
+      const playlists = await api(token()).ownedPlaylists(abort.signal)
+      abort.signal.throwIfAborted()
+      setOwnedPlaylists(playlists)
+    } catch (error) {
+      if (!abort.signal.aborted) handleError(error)
+    } finally {
+      controller.current = null
+      setMode(undefined)
+    }
   }
 
   async function fetchDifference(event: FormEvent) {
@@ -207,6 +227,25 @@ function App() {
     }
   }
 
+  async function discardQueue() {
+    if (!queue || !navigator.locks || !window.confirm('保存した追加キューと結果を削除しますか？ YouTube に追加済みの動画は残ります。')) return
+    setError('')
+    try {
+      await navigator.locks.request(queueKey, { ifAvailable: true }, lock => {
+        if (!lock) throw new Error('別のタブで追加処理を実行しています。')
+        const stored = loadQueue()
+        if (JSON.stringify(stored) !== JSON.stringify(queue)) {
+          throw new Error('別のタブで追加キューが変更されました。現在の内容を確認してからやり直してください。')
+        }
+        localStorage.removeItem(queueKey)
+        setQueue(null)
+        setProgress('')
+      })
+    } catch (error) {
+      handleError(error)
+    }
+  }
+
   function approve() {
     if (!comparison || !selected.size) return
     const jobs = comparison.videos.filter(video => !video.issue && selected.has(video.id))
@@ -218,9 +257,9 @@ function App() {
   function exportVideos(filtered: boolean) {
     const videos = filtered ? matches : comparison?.videos ?? []
     download(filtered ? 'filtered-videos' : 'playlist-difference', [
-      ['動画ID', 'タイトル', 'チャンネル', '公開日（日本時間）', '再生回数', 'URL', '状態'],
+      ['動画ID', 'タイトル', 'チャンネル', '公開日（日本時間）', '再生回数', '長さ（秒）', 'URL', '状態'],
       ...videos.map(video => [
-        video.id, video.title, video.channel, publishedDay(video.published), video.views ?? '',
+        video.id, video.title, video.channel, publishedDay(video.published), video.views ?? '', video.durationSeconds ?? '',
         videoUrl(video.id), video.issue ?? '取得済み',
       ]),
     ])
@@ -268,11 +307,24 @@ function App() {
               {comparison && <span className="muted title">{comparison.sourceTitle}</span>}
             </label>
             <label>追加先
-              <input value={target} required disabled={busy} onChange={event => { setTarget(event.target.value); clearComparison() }} />
+              <input value={target} placeholder="追加先の URL または ID" required disabled={busy} onChange={event => { setTarget(event.target.value); clearComparison() }} />
               {comparison && <span className="muted title">{comparison.targetTitle}</span>}
             </label>
           </div>
-          <p className="muted">URL または再生リスト ID を指定できます。</p>
+          <p className="muted">URL または再生リスト ID を指定できます。動画を追加する場合は、自分のチャンネルの再生リストを選んでください。</p>
+          <div className="actions">
+            <button type="button" disabled={busy || !session} onClick={() => void fetchOwnedPlaylists()}>
+              {mode === 'choosing' ? '再生リストを取得中…' : '自分の再生リストを取得'}
+            </button>
+            {mode === 'choosing' && <button type="button" onClick={() => controller.current?.abort()}>一覧の取得を中止</button>}
+          </div>
+          {ownedPlaylists && (ownedPlaylists.length ? <label className="owned-playlists">自分の再生リストから追加先を選ぶ
+            <select disabled={busy} value={ownedPlaylists.some(list => list.id === target) ? target : ''}
+              onChange={event => { setTarget(event.target.value); setError(''); clearComparison() }}>
+              <option value="" disabled>再生リストを選択</option>
+              {ownedPlaylists.map(list => <option key={list.id} value={list.id}>{list.title}（{list.id}）</option>)}
+            </select>
+          </label> : <p className="muted" role="status">認証したチャンネルに再生リストがありません。YouTube で作成するか、別のチャンネルで認証し直してください。</p>)}
           <div className="actions">
             <button className="primary" disabled={busy || !session}>差分を取得</button>
             <label className="check"><input type="checkbox" checked={readOnly} disabled={busy}
@@ -301,10 +353,15 @@ function App() {
                 onChange={event => { setFilters({ ...filters, min: event.target.value }); setPage(0) }} /></label>
               <label>再生回数の上限<input inputMode="numeric" value={filters.max} placeholder="指定なし"
                 onChange={event => { setFilters({ ...filters, max: event.target.value }); setPage(0) }} /></label>
+              <label>動画の長さの下限（分）<input inputMode="numeric" value={filters.minDuration} placeholder="指定なし"
+                onChange={event => { setFilters({ ...filters, minDuration: event.target.value }); setPage(0) }} /></label>
+              <label>動画の長さの上限（分）<input inputMode="numeric" value={filters.maxDuration} placeholder="指定なし"
+                onChange={event => { setFilters({ ...filters, maxDuration: event.target.value }); setPage(0) }} /></label>
               <label>タイトル検索<input value={filters.title} placeholder="キーワード"
                 onChange={event => { setFilters({ ...filters, title: event.target.value }); setPage(0) }} /></label>
             </div>
             <div className="actions presets">
+              <button onClick={() => { setFilters({ ...filters, minDuration: '20' }); setPage(0) }}>20分以上</button>
               <button onClick={() => { setFilters({ ...filters, year: '2026' }); setPage(0) }}>2026年</button>
               <button onClick={() => { setFilters({ ...filters, min: '1000000' }); setPage(0) }}>100万再生以上</button>
               <button onClick={() => { setFilters({ ...filters, min: '10000000' }); setPage(0) }}>1000万再生以上</button>
@@ -340,7 +397,7 @@ function App() {
           <div className="table-wrap" tabIndex={0} role="region" aria-label="候補動画の一覧">
             <table>
               <thead><tr><th scope="col">選択</th><th scope="col">動画</th><th scope="col">公開日（JST）</th>
-                <th scope="col">再生回数</th><th scope="col">状態</th></tr></thead>
+                <th scope="col">再生回数</th><th scope="col">長さ</th><th scope="col">状態</th></tr></thead>
               <tbody>{visible.map(video => {
                 const job = queue?.target === playlistId(target) ? jobById.get(video.id) : undefined
                 return <tr key={video.id}>
@@ -358,6 +415,7 @@ function App() {
                   </div></td>
                   <td>{publishedDay(video.published) || '不明'}</td>
                   <td>{video.views === undefined ? '不明' : number.format(video.views)}</td>
+                  <td>{formatDuration(video.durationSeconds) || '不明'}</td>
                   <td>{video.issue ?? (job ? statusLabel[job.status] : '追加候補')}</td>
                 </tr>
               })}</tbody>
@@ -400,7 +458,8 @@ function App() {
         {queue ? <>
           <h3>{queue.title}</h3>
           {mode === 'writing' && <p role="status" className="feedback">{currentJob ? '処理中 · ' + currentJob.title : progress}</p>}
-          {!mode && (progress.startsWith('追加処理')) && <p role="status" className="feedback">{progress}</p>}
+          {!mode && progress.startsWith('追加処理') && <p role="status" className="feedback">{progress}</p>}
+          {!mode && progress.startsWith('追加処理') && error && <p className="error">{error}</p>}
           <div className="metrics" aria-live="polite">
             <span>成功 <b>{queue.jobs.filter(job => job.status === 'added').length}</b></span>
             <span>失敗 <b>{queue.jobs.filter(job => job.status === 'failed').length}</b></span>
@@ -412,6 +471,7 @@ function App() {
               ? <button onClick={() => { controller.current?.abort(); setProgress('停止中 · 送信済みの操作を確認しています。') }}>停止</button>
               : <button disabled={!remaining || !session || readOnly || busy || !storageReady} onClick={() => void processQueue()}>再開</button>}
             <button onClick={() => exportJobs(queue)}>追加結果 CSV</button>
+            {remaining > 0 && <button disabled={busy || !storageReady} onClick={() => void discardQueue()}>保存キューを破棄</button>}
           </div>
           <div className="table-wrap result-wrap" tabIndex={0} role="region" aria-label="追加結果の一覧">
             <table><thead><tr><th scope="col">動画</th><th scope="col">状態</th><th scope="col">詳細</th></tr></thead>

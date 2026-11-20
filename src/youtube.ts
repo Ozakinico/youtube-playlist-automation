@@ -7,6 +7,10 @@ export class ApiError extends Error {
   get quota() {
     return ['quotaExceeded', 'dailyLimitExceeded', 'dailyLimitExceededUnreg'].includes(this.reason)
   }
+  get destinationWriteBlocked() {
+    return ['playlistItemsNotAccessible', 'playlistOperationUnsupported', 'playlistNotFound', 'insufficientPermissions']
+      .includes(this.reason) || (this.status === 403 && this.reason === 'forbidden')
+  }
   get transient() {
     return this.status === 0 || this.status === 429 || this.status >= 500 ||
       ['rateLimitExceeded', 'userRateLimitExceeded'].includes(this.reason)
@@ -16,6 +20,11 @@ export class ApiError extends Error {
 interface Page<T> {
   items: T[]
   nextPageToken?: string
+}
+
+interface OwnedPlaylist {
+  id: string
+  title: string
 }
 
 export function createYouTube(token: string, onRequest: (write: boolean) => void, request = fetch) {
@@ -48,6 +57,18 @@ export function createYouTube(token: string, onRequest: (write: boolean) => void
         'playlists', { part: 'snippet', id: ids.join(',') }, signal,
       )
       return new Map(page.items.map(item => [item.id, item.snippet.title]))
+    },
+    async ownedPlaylists(signal?: AbortSignal) {
+      const playlists: OwnedPlaylist[] = []
+      let pageToken: string | undefined
+      do {
+        const page: Page<{ id: string; snippet: { title: string } }> = await call(
+          'playlists', { part: 'snippet', mine: 'true', maxResults: '50', ...(pageToken && { pageToken }) }, signal,
+        )
+        playlists.push(...page.items.map(item => ({ id: item.id, title: item.snippet.title })))
+        pageToken = page.nextPageToken
+      } while (pageToken)
+      return playlists
     },
     async items(id: string, signal?: AbortSignal, progress?: (count: number) => void) {
       const ids: string[] = []

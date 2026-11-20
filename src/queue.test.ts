@@ -66,11 +66,23 @@ it('finishes an in-flight write on stop and preserves later work', async () => {
 it('records a permanent error and continues with later jobs', async () => {
   const api = {
     items: vi.fn(async () => []),
-    insert: vi.fn(async () => {}).mockRejectedValueOnce(new ApiError(403, 'playlistItemsNotAccessible', 'Denied')),
+    insert: vi.fn(async () => {}).mockRejectedValueOnce(new ApiError(404, 'videoNotFound', 'Not found')),
   }
   const save = vi.fn()
   await runQueue(makeQueue(first, second), api, save, signal(), delay)
   expect(api.insert).toHaveBeenCalledTimes(2)
-  expect(save.mock.lastCall?.[0].jobs[0]).toMatchObject({ status: 'failed', detail: 'playlistItemsNotAccessible · Denied' })
+  expect(save.mock.lastCall?.[0].jobs[0]).toMatchObject({ status: 'failed', detail: 'videoNotFound · Not found' })
   expect(save.mock.lastCall?.[0].jobs[1].status).toBe('added')
+})
+
+it('pauses the remaining queue after a destination permission error', async () => {
+  const error = new ApiError(403, 'playlistItemsNotAccessible', 'Forbidden')
+  const api = { items: vi.fn(async () => []), insert: vi.fn().mockRejectedValue(error) }
+  const save = vi.fn()
+  await expect(runQueue(makeQueue(first, second), api, save, signal(), delay)).rejects.toBe(error)
+  expect(api.insert).toHaveBeenCalledExactlyOnceWith('PLtarget', first)
+  expect(save.mock.lastCall?.[0].jobs).toMatchObject([
+    { status: 'pending', detail: expect.stringContaining('所有する通常の再生リスト') },
+    { status: 'pending' },
+  ])
 })
