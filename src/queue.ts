@@ -38,6 +38,9 @@ export function errorText(error: unknown) {
   if (error instanceof ApiError) {
     if (error.status === 401) return '認証が失効しました。再認証してから再開してください。'
     if (error.quota) return 'YouTube API のクォータ上限に達しました。Google Cloud で確認してから再開してください。'
+    if (error.destinationWriteBlocked) {
+      return '追加先への書き込みが拒否されました。現在の YouTube チャンネルが所有する通常の再生リストを選ぶか、所有者のチャンネルで認証し直してください。 (' + error.reason + ')'
+    }
     return [error.reason, error.message].filter(Boolean).join(' · ')
   }
   return error instanceof Error ? error.message : '処理に失敗しました。'
@@ -85,7 +88,7 @@ export async function runQueue(
       try {
         await api.insert(queue.target, job.id)
       } catch (error) {
-        if (error instanceof ApiError && (error.quota || error.status === 401)) {
+        if (error instanceof ApiError && (error.quota || error.status === 401 || error.destinationWriteBlocked)) {
           update(job, 'pending', errorText(error))
           throw error
         }

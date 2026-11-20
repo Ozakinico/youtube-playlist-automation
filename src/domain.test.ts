@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { csv, difference, estimateQuota, filterVideos, initialFilters, normalizeVideo, playlistId, validateFilters } from './domain'
+import { csv, difference, estimateQuota, filterVideos, formatDuration, initialFilters, normalizeVideo, playlistId, validateFilters } from './domain'
 
 describe('playlist comparison', () => {
   it('accepts IDs and playlist or watch URLs', () => {
@@ -61,4 +61,21 @@ describe('filters', () => {
 it('estimates reads and writes and escapes CSV formulas and quotes', () => {
   expect(estimateQuota(10, 55)).toBe(2760)
   expect(csv([[' =HYPERLINK("x")', '日本語', 10000000n]])).toBe('\uFEFF"\' =HYPERLINK(""x"")","日本語","10000000"')
+})
+
+it('filters by inclusive duration boundaries and combines them with other conditions', () => {
+  const videos = [
+    ['short', 'PT19M59S'], ['start', 'PT20M'], ['end', 'PT1H'], ['long', 'PT1H1S'],
+    ['missing', undefined], ['live', 'PT0S'], ['invalid', 'P1DT'],
+  ].map(([id, duration]) => normalizeVideo(id!, {
+    id: id!, snippet: { title: id!, publishedAt: '2026-01-01T00:00:00Z' },
+    statistics: { viewCount: '1000000' }, contentDetails: { duration },
+  }))
+  const range = { ...initialFilters, minDuration: '20', maxDuration: '60', year: '2026' }
+  expect(filterVideos(videos, range).map(video => video.id)).toEqual(['start', 'end'])
+  expect(filterVideos(videos, { ...range, min: '1000001' })).toEqual([])
+  expect(filterVideos(videos, initialFilters)).toHaveLength(7)
+  expect(formatDuration(videos[2].durationSeconds)).toBe('1:00:00')
+  expect(validateFilters({ ...range, maxDuration: '19' })).toBeTruthy()
+  expect(validateFilters({ ...range, minDuration: '-1' })).toBeTruthy()
 })

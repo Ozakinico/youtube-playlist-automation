@@ -4,6 +4,7 @@ export interface Video {
   channel: string
   published: string
   views?: bigint
+  durationSeconds?: number
   thumbnail?: string
   issue?: string
 }
@@ -17,11 +18,11 @@ export interface VideoResource {
     thumbnails?: { medium?: { url: string }; default?: { url: string } }
   }
   statistics?: { viewCount?: string }
-  contentDetails?: { regionRestriction?: { allowed?: string[]; blocked?: string[] } }
+  contentDetails?: { duration?: string; regionRestriction?: { allowed?: string[]; blocked?: string[] } }
 }
 
 export const initialFilters = {
-  year: '', from: '', to: '', min: '', max: '', title: '', sort: 'source',
+  year: '', from: '', to: '', min: '', max: '', minDuration: '', maxDuration: '', title: '', sort: 'source',
 }
 export type Filters = typeof initialFilters
 
@@ -47,6 +48,22 @@ export function difference(source: string[], target: string[]): string[] {
   return [...new Set(source)].filter(id => !existing.has(id))
 }
 
+function durationSeconds(value?: string) {
+  const match = value?.match(/^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/)
+  if (!match || !match.slice(1).some(Boolean) || value?.endsWith('T')) return undefined
+  const [, days = '0', hours = '0', minutes = '0', seconds = '0'] = match
+  const total = Number(days) * 86400 + Number(hours) * 3600 + Number(minutes) * 60 + Number(seconds)
+  return Number.isSafeInteger(total) && total > 0 ? total : undefined
+}
+
+export function formatDuration(seconds?: number) {
+  if (seconds === undefined) return ''
+  const minutes = Math.floor(seconds / 60)
+  const remainder = String(seconds % 60).padStart(2, '0')
+  if (minutes < 60) return minutes + ':' + remainder
+  return Math.floor(minutes / 60) + ':' + String(minutes % 60).padStart(2, '0') + ':' + remainder
+}
+
 export function normalizeVideo(id: string, resource?: VideoResource): Video {
   const snippet = resource?.snippet
   const count = resource?.statistics?.viewCount
@@ -61,7 +78,8 @@ export function normalizeVideo(id: string, resource?: VideoResource): Video {
   else if (views === undefined) issue = '再生回数が取得できません'
   return {
     id, title: snippet?.title ?? id, channel: snippet?.channelTitle ?? '',
-    published, views, thumbnail: snippet?.thumbnails?.medium?.url ?? snippet?.thumbnails?.default?.url, issue,
+    published, views, durationSeconds: durationSeconds(resource?.contentDetails?.duration),
+    thumbnail: snippet?.thumbnails?.medium?.url ?? snippet?.thumbnails?.default?.url, issue,
   }
 }
 
@@ -77,6 +95,13 @@ export function validateFilters(filters: Filters) {
   if (filters.from && filters.to && filters.from > filters.to) return '公開日の開始は終了以前にしてください。'
   if ([filters.min, filters.max].some(value => value && !/^\d+$/.test(value))) return '再生回数は非負整数で入力してください。'
   if (filters.min && filters.max && BigInt(filters.min) > BigInt(filters.max)) return '再生回数の下限は上限以下にしてください。'
+  if ([filters.minDuration, filters.maxDuration].some(value =>
+    value && (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value) * 60)))) {
+    return '動画の長さは分単位の非負整数で入力してください。'
+  }
+  if (filters.minDuration && filters.maxDuration && Number(filters.minDuration) > Number(filters.maxDuration)) {
+    return '動画の長さの下限は上限以下にしてください。'
+  }
   return ''
 }
 
@@ -84,9 +109,14 @@ export function filterVideos(videos: Video[], filters: Filters) {
   if (validateFilters(filters)) return []
   const minimum = filters.min ? BigInt(filters.min) : undefined
   const maximum = filters.max ? BigInt(filters.max) : undefined
+  const shortest = filters.minDuration === '' ? undefined : Number(filters.minDuration) * 60
+  const longest = filters.maxDuration === '' ? undefined : Number(filters.maxDuration) * 60
   const query = filters.title.trim().toLocaleLowerCase('ja')
   const matches = videos.filter(video => {
     if (video.issue || video.views === undefined) return false
+    const duration = video.durationSeconds
+    if (shortest !== undefined && (duration === undefined || duration < shortest)) return false
+    if (longest !== undefined && (duration === undefined || duration > longest)) return false
     const day = publishedDay(video.published)
     return (!filters.year || day.slice(0, 4) === filters.year) &&
       (!filters.from || day >= filters.from) && (!filters.to || day <= filters.to) &&
